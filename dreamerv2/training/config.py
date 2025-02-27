@@ -10,14 +10,14 @@ class MinAtarConfig():
     '''default HPs that are known to work for MinAtar envs '''
     #env desc
     env : str                                           
-    obs_shape: Tuple                                            
-    action_size: int
+    obs_shape: Tuple  # 游戏空间shape                                        
+    action_size: int # 动作空间大小
     pixel: bool = True
     action_repeat: int = 1
     
     #buffer desc
     capacity: int = int(1e6)
-    obs_dtype: np.dtype = np.uint8
+    obs_dtype: np.dtype = np.uint8 # todo 观测数据类型，这个的类型作用时什么
     action_dtype: np.dtype = np.float32
 
     #training desc

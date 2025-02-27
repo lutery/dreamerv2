@@ -43,8 +43,9 @@ def main(args):
     obs_dtype = bool
     action_dtype = np.float32
     batch_size = args.batch_size
-    seq_len = args.seq_len
+    seq_len = args.seq_len # 采集的序列长度
 
+    # atari 游戏配置
     config = MinAtarConfig(
         env=env_name,
         obs_shape=obs_shape,
@@ -57,7 +58,9 @@ def main(args):
     )
 
     config_dict = config.__dict__
+    # 训练器
     trainer = Trainer(config, device)
+    # 验证器
     evaluator = Evaluator(config, device)
     
     with wandb.init(project='mastering MinAtar with world models', config=config_dict):
