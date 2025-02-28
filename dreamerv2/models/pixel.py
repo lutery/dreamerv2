@@ -7,8 +7,9 @@ import torch.nn as nn
 class ObsEncoder(nn.Module):
     def __init__(self, input_shape, embedding_size, info):
         """
-        :param input_shape: tuple containing shape of input
-        :param embedding_size: Supposed length of encoded vector
+        :param input_shape: tuple containing shape of input，输入观察的形状
+        :param embedding_size: Supposed length of encoded vector，希望的编码向量的维度
+        :param info: dict containing num of hidden layers, size of hidden layers, activation function, output distribution etc.
         """
         super(ObsEncoder, self).__init__()
         self.shape = input_shape
@@ -25,15 +26,21 @@ class ObsEncoder(nn.Module):
             nn.Conv2d(2*d, 4*d, k),
             activation(),
         )
+
+        # 这一层是确保输出的维度是embedding_size
         if embedding_size == self.embed_size:
             self.fc_1 = nn.Identity()
         else:
             self.fc_1 = nn.Linear(self.embed_size, embedding_size)
 
     def forward(self, obs):
+        # batch_shape应该是 l, n
         batch_shape = obs.shape[:-3]
+        # img_shape应该是 c, h, w
         img_shape = obs.shape[-3:]
+        # 将l,n维度展品送入卷积层，顺序应该整体还是序列时间顺序
         embed = self.convolutions(obs.reshape(-1, *img_shape))
+        # 完成后再reshape回来，此时shape应该是 l, n, k * w * h
         embed = torch.reshape(embed, (*batch_shape, -1))
         embed = self.fc_1(embed)
         return embed

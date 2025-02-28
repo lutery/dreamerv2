@@ -83,8 +83,8 @@ class MiniGridConfig():
     action_dtype: np.dtype = np.float32
 
     #training desc
-    train_steps: int = int(1e6)
-    train_every: int = 5
+    train_steps: int = int(1e6) # 训练的步数
+    train_every: int = 5 # 每几步训练一次
     collect_intervals: int = 5
     batch_size: int = 50
     seq_len: int = 8

@@ -4,6 +4,9 @@ from collections import namedtuple, deque
 from typing import Optional, Tuple
 
 class TransitionBuffer():
+    '''
+    经验回放缓冲区
+    '''
     def __init__(
         self,
         capacity,
@@ -20,7 +23,7 @@ class TransitionBuffer():
         self.action_size = action_size
         self.obs_type = obs_type
         self.action_type = action_type
-        self.seq_len = seq_len
+        self.seq_len = seq_len # 采样的连续序列长度
         self.batch_size = batch_size
         self.idx = 0
         self.full = False
@@ -52,20 +55,33 @@ class TransitionBuffer():
         return idxs
 
     def _retrieve_batch(self, idxs, n, l):
+        # idxs shape=(n, l)
+        # idxs transpose shape=(l, n) 这里和dreamerv1一致
+        # idxs.transpose().reshape(-1) 展平，使得vec_idxs=[l11,l21,l31...lnl, l12,l22,l32...ln2 ...]
         vec_idxs = idxs.transpose().reshape(-1)
         observation = self.observation[vec_idxs]
+        # observation.reshape(l, n, *self.obs_shape) shape=(l, n, *self.obs_shape)
+        # self.action[vec_idxs] shape=(l*n, action_size) reshape(l, n, -1) shape=(l, n, action_size)
+        # self.reward[vec_idxs] shape=(l*n,) reshape(l, n) shape=(l, n)
+        # self.terminal[vec_idxs] shape=(l*n,) reshape(l, n) shape=(l, n)
         return observation.reshape(l, n, *self.obs_shape), self.action[vec_idxs].reshape(l, n, -1), self.reward[vec_idxs].reshape(l, n), self.terminal[vec_idxs].reshape(l, n)
 
     def sample(self):
         n = self.batch_size
-        l = self.seq_len+1
+        l = self.seq_len+1 # 这边序列长度是seq_len+1是后续要进行shift操作
+        # np.asarray([self._sample_idx(l) for _ in range(n)]), n, l) 返回的shape=(n, l)
         obs,act,rew,term = self._retrieve_batch(np.asarray([self._sample_idx(l) for _ in range(n)]), n, l)
+        # 偏移处理采样序列
         obs,act,rew,term = self._shift_sequences(obs,act,rew,term)
         return obs,act,rew,term
     
     def _shift_sequences(self, obs, actions, rewards, terminals):
-        obs = obs[1:]
-        actions = actions[:-1]
+        # 对采样进行shift操作，适配RSSM的输入对齐
+        obs = obs[1:] # obs去除第一个
+        # 其余的都去除最后一个，其余的都比obs提前一个操作
+        # 相当于原来是obs1下执行action1得到obs2,现在变成仅支持action1和得到的Obs2，而不知道obs1了
+        # todo 这个作用在训练时的那个部分需要？
+        actions = actions[:-1] 
         rewards = rewards[:-1]
         terminals = terminals[:-1]
         return obs, actions, rewards, terminals

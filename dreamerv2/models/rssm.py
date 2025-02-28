@@ -3,6 +3,16 @@ import torch.nn as nn
 from dreamerv2.utils.rssm import RSSMUtils, RSSMContState, RSSMDiscState
 
 class RSSM(nn.Module, RSSMUtils):
+    '''
+    在 DreamerV2 算法中，RSSM（Recurrent State-Space Model，递归状态空间模型）的作用是用于在隐空间中建模环境的动态变化。它是 DreamerV2 的核心组件之一，负责将环境的观察转换为隐状态表示，并根据隐状态和动作预测未来的状态。
+
+具体来说，RSSM 的主要作用包括：
+
+状态表示：将环境的观察（observations）转换为隐状态（latent states），这些隐状态捕捉了环境的动态特征。
+状态预测：根据当前的隐状态和动作，预测下一个隐状态。这使得模型能够在隐空间中进行模拟和规划。
+重构观察：从隐状态重构出原始观察，这有助于训练过程中进行对比学习（contrastive learning）。
+奖励预测：从隐状态预测奖励，这有助于训练代理的策略和价值函数。
+    '''
     def __init__(
         self,
         action_size,
@@ -20,7 +30,7 @@ class RSSM(nn.Module, RSSMUtils):
         self.node_size = rssm_node_size
         self.embedding_size = embedding_size
         self.act_fn = act_fn
-        self.rnn = nn.GRUCell(self.deter_size, self.deter_size)
+        self.rnn = nn.GRUCell(self.deter_size, self.deter_size) # 有一个RNN层
         self.fc_embed_state_action = self._build_embed_state_action()
         self.fc_prior = self._build_temporal_prior()
         self.fc_posterior = self._build_temporal_posterior()
@@ -30,6 +40,10 @@ class RSSM(nn.Module, RSSMUtils):
         model is supposed to take in previous stochastic state and previous action 
         and embed it to deter size for rnn input
         """
+        # 将随机状态stochastic state 和前一个动作嵌入到一个确定的deter_size 维度
+        # 也就是提取了特征后输入到RNN中
+        # todo 这是模型在上一个时间步预测的随机状态，表示环境的隐状态
+        # todo 这是代理在上一个时间步执行的动作
         fc_embed_state_action = [nn.Linear(self.stoch_size + self.action_size, self.deter_size)]
         fc_embed_state_action += [self.act_fn()]
         return nn.Sequential(*fc_embed_state_action)
@@ -38,7 +52,11 @@ class RSSM(nn.Module, RSSMUtils):
         """
         model is supposed to take in latest deterministic state 
         and output prior over stochastic state
+        选中的注释解释了模型的另一个关键功能：如何从最新的确定性状态（deterministic state）生成随机状态（stochastic state）的先验分布（prior）
         """
+        # deter_size 是确定性状态的维度
+        # node_size 是 RSSM 的节点大小
+        # stoch_size 是随机状态的大小
         temporal_prior = [nn.Linear(self.deter_size, self.node_size)]
         temporal_prior += [self.act_fn()]
         if self.rssm_type == 'discrete':
@@ -51,6 +69,16 @@ class RSSM(nn.Module, RSSMUtils):
         """
         model is supposed to take in latest embedded observation and deterministic state 
         and output posterior over stochastic states
+        选中的注释解释了模型的另一个关键功能：如何从最新的嵌入观察（embedded observation）和确定性状态（deterministic state）生成随机状态（stochastic state）的后验分布（posterior）
+        最新的嵌入观察（latest embedded observation）：
+        这是模型在当前时间步从环境中获取的观察数据，经过编码器处理后得到的嵌入表示。
+
+        确定性状态（deterministic state）：
+        这是模型在当前时间步通过 RNN 计算得到的确定性状态，表示环境的隐状态。
+
+        生成随机状态的后验分布（output posterior over stochastic states）：
+        模型使用最新的嵌入观察和确定性状态来生成一个后验分布，这个分布描述了随机状态的可能值。
+        后验分布通常用参数化的概率分布（如高斯分布）来表示，参数包括均值和方差。
         """
         temporal_posterior = [nn.Linear(self.deter_size + self.embedding_size, self.node_size)]
         temporal_posterior += [self.act_fn()]
@@ -94,6 +122,12 @@ class RSSM(nn.Module, RSSMUtils):
         return next_rssm_states, imag_log_probs, action_entropy
 
     def rssm_observe(self, obs_embed, prev_action, prev_nonterm, prev_rssm_state):
+        '''
+        obs_embed: t+1时刻的观察嵌入特征
+        prev_action: t时刻的动作,如果是终止状态则是0
+        prev_nonterm: t时刻的非终止状态
+        prev_rssm_state: t时刻的RSSM状态
+        '''
         prior_rssm_state = self.rssm_imagine(prev_action, prev_rssm_state, prev_nonterm)
         deter_state = prior_rssm_state.deter
         x = torch.cat([deter_state, obs_embed], dim=-1)
@@ -113,7 +147,11 @@ class RSSM(nn.Module, RSSMUtils):
     def rollout_observation(self, seq_len:int, obs_embed: torch.Tensor, action: torch.Tensor, nonterms: torch.Tensor, prev_rssm_state):
         priors = []
         posteriors = []
+        # 遍历序列长度
         for t in range(seq_len):
+            # t时刻的动作 乘以 t时刻的非终止状态
+            # 如果不终止，那么prev_action 就是 t时刻的动作
+            # 如果终止，那么prev_action 就是 t时刻的动作乘以0,最终结果也是0
             prev_action = action[t]*nonterms[t]
             prior_rssm_state, posterior_rssm_state = self.rssm_observe(obs_embed[t], prev_action, nonterms[t], prev_rssm_state)
             priors.append(prior_rssm_state)

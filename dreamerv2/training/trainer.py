@@ -26,7 +26,7 @@ class Trainer(object):
         self.seq_len = config.seq_len
         self.batch_size = config.batch_size
         self.collect_intervals = config.collect_intervals
-        self.seed_steps = config.seed_steps
+        self.seed_steps = config.seed_steps # 初始化种子数据集的长度，用于预热缓冲区
         self.discount = config.discount_
         self.lambda_ = config.lambda_
         self.horizon = config.horizon
@@ -38,6 +38,10 @@ class Trainer(object):
         self._optim_initialize(config)
 
     def collect_seed_episodes(self, env):
+        '''
+        相当于预热缓冲区
+        方法的作用通常是收集初始的种子数据集（seed episodes），这些数据集用于初始化强化学习算法的经验回放缓冲区。在强化学习中，种子数据集可以通过随机策略在环境中采样得到，以便为后续的训练提供初始经验
+        '''
         s, done  = env.reset(), False 
         for i in range(self.seed_steps):
             a = env.action_space.sample()
@@ -74,6 +78,7 @@ class Trainer(object):
             rewards = torch.tensor(rewards, dtype=torch.float32).to(self.device).unsqueeze(-1)   #t-1 to t+seq_len-1
             nonterms = torch.tensor(1-terms, dtype=torch.float32).to(self.device).unsqueeze(-1)  #t-1 to t+seq_len-1
 
+            # 计算损失
             model_loss, kl_loss, obs_loss, reward_loss, pcont_loss, prior_dist, post_dist, posterior = self.representation_loss(obs, actions, rewards, nonterms)
             
             self.model_optimizer.zero_grad()
@@ -163,8 +168,16 @@ class Trainer(object):
         return actor_loss, value_loss, target_info
 
     def representation_loss(self, obs, actions, rewards, nonterms):
+        '''
+        param obs: 观察
+        param actions: 动作
+        param rewards: 奖励
+        param nonterms: 非终止状态
+        '''
 
+        # 得到观察的嵌入特征
         embed = self.ObsEncoder(obs)                                         #t to t+seq_len   
+        # 获取rssm初始化特征，每次训练计算损失时都需要初始化
         prev_rssm_state = self.RSSM._init_rssm_state(self.batch_size)   
         prior, posterior = self.RSSM.rollout_observation(self.seq_len, embed, actions, nonterms, prev_rssm_state)
         post_modelstate = self.RSSM.get_model_state(posterior)               #t to t+seq_len   
@@ -243,6 +256,9 @@ class Trainer(object):
         return pcont_loss
 
     def update_target(self):
+        '''
+        同步更新目标值网络
+        '''
         mix = self.config.slow_target_fraction if self.config.use_slow_target else 1
         for param, target_param in zip(self.ValueModel.parameters(), self.TargetValueModel.parameters()):
             target_param.data.copy_(mix * param.data + (1 - mix) * target_param.data)
@@ -277,6 +293,14 @@ class Trainer(object):
         obs_shape = config.obs_shape
         action_size = config.action_size
         deter_size = config.rssm_info['deter_size']
+        '''
+        判断 RSSM（递归状态空间模型）的类型是“连续”还是“离散”。
+
+        具体来说，代码根据 config.rssm_type 的值来配置不同类型的 RSSM 模型：
+
+        如果 config.rssm_type 是 'continuous'，则使用 stoch_size（随机状态的大小）来配置连续类型的 RSSM。
+        如果 config.rssm_type 是 'discrete'，则使用 category_size 和 class_size 来配置离散类型的 RSSM。
+        '''
         if config.rssm_type == 'continuous':
             stoch_size = config.rssm_info['stoch_size']
         elif config.rssm_type == 'discrete':
@@ -286,6 +310,7 @@ class Trainer(object):
 
         embedding_size = config.embedding_size
         rssm_node_size = config.rssm_node_size
+        # 别代表随机状态（stochastic state）和确定性状态（deterministic state）的维度。这两个参数是递归状态空间模型（RSSM）的核心组成部分，用于表示和预测环境的隐状态
         modelstate_size = stoch_size + deter_size 
     
         self.buffer = TransitionBuffer(config.capacity, obs_shape, action_size, config.seq_len, config.batch_size, config.obs_dtype, config.action_dtype)
@@ -296,8 +321,11 @@ class Trainer(object):
         self.TargetValueModel = DenseModel((1,), modelstate_size, config.critic).to(self.device)
         self.TargetValueModel.load_state_dict(self.ValueModel.state_dict())
         
+        # 判断是否加入折扣因子模型，用于预测长期的回报
         if config.discount['use']:
             self.DiscountModel = DenseModel((1,), modelstate_size, config.discount).to(self.device)
+        
+        # 构建环境观察编码器和解码器（分像素空间和线性空间）
         if config.pixel:
             self.ObsEncoder = ObsEncoder(obs_shape, embedding_size, config.obs_encoder).to(self.device)
             self.ObsDecoder = ObsDecoder(obs_shape, modelstate_size, config.obs_decoder).to(self.device)

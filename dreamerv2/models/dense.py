@@ -3,6 +3,10 @@ import torch.nn as nn
 import torch.distributions as td
 
 class DenseModel(nn.Module):
+    '''
+    动作生成（actor）
+    值函数估计（critic）
+    '''
     def __init__(
             self, 
             output_shape,
@@ -15,8 +19,8 @@ class DenseModel(nn.Module):
         :param info: dict containing num of hidden layers, size of hidden layers, activation function, output distribution etc.
         """
         super().__init__()
-        self._output_shape = output_shape
-        self._input_size = input_size
+        self._output_shape = output_shape # 如果是用于reward和value，那么输出的output_shape是1维的
+        self._input_size = input_size # stoch_size + deter_size：
         self._layers = info['layers']
         self._node_size = info['node_size']
         self.activation = info['activation']
@@ -24,6 +28,9 @@ class DenseModel(nn.Module):
         self.model = self.build_model()
 
     def build_model(self):
+        # 全连接神经网络
+        # todo 搞清楚self.input_size是输入什么东西
+        # 
         model = [nn.Linear(self._input_size, self._node_size)]
         model += [self.activation()]
         for i in range(self._layers-1):

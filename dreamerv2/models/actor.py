@@ -3,6 +3,9 @@ import torch.nn as nn
 import numpy as np
 
 class DiscreteActionModel(nn.Module):
+    '''
+    离散动作模型
+    '''
     def __init__(
         self,
         action_size,
@@ -30,12 +33,25 @@ class DiscreteActionModel(nn.Module):
         self.model = self._build_model()
 
     def _build_model(self):
+        '''
+        输入维度：
+
+        self.deter_size：确定性状态的维度，表示通过 RNN 计算得到的隐状态。
+        self.stoch_size：随机状态的维度，表示通过先验或后验分布生成的隐状态。
+        self.deter_size + self.stoch_size：输入层的总维度，是确定性状态和随机状态的拼接。
+
+        self.node_size：隐藏层的节点数量，表示每个隐藏层的输出维度。
+        self.layers：隐藏层的数量，表示网络中隐藏层的层数。
+
+        todo 搞清楚在实际运行时，每个输入的谁是从哪里来的，然后到哪里去。
+        '''
         model = [nn.Linear(self.deter_size + self.stoch_size, self.node_size)]
         model += [self.act_fn()]
         for i in range(1, self.layers):
             model += [nn.Linear(self.node_size, self.node_size)]
             model += [self.act_fn()]
 
+        # 输出动作分布，仅实现了 one-hot 动作分布。
         if self.dist == 'one_hot':
             model += [nn.Linear(self.node_size, self.action_size)]
         else:

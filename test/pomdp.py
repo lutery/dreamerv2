@@ -63,14 +63,17 @@ def main(args):
     # 验证器
     evaluator = Evaluator(config, device)
     
+    # wandb可视化训练配置
     with wandb.init(project='mastering MinAtar with world models', config=config_dict):
         """training loop"""
         print('...training...')
-        train_metrics = {}
+        train_metrics = {} # 这个应该只是保存的可视化训练指标
         trainer.collect_seed_episodes(env)
         obs, score = env.reset(), 0
         done = False
+        # 获取初始化的RSSM状态，包含确定性状态和随机状态
         prev_rssmstate = trainer.RSSM._init_rssm_state(1)
+        # 获取初始化的Action，初始为0 tensor
         prev_action = torch.zeros(1, trainer.action_size).to(trainer.device)
         episode_actor_ent = []
         scores = []

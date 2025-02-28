@@ -13,6 +13,7 @@ class RSSMUtils(object):
     '''utility functions for dealing with rssm states'''
     def __init__(self, rssm_type, info):
         self.rssm_type = rssm_type
+        # 这边根据状态是连续的还是离散的选择不同的type
         if rssm_type == 'continuous':
             self.deter_size = info['deter_size']
             self.stoch_size = info['stoch_size']
@@ -116,6 +117,15 @@ class RSSMUtils(object):
             )
 
     def _init_rssm_state(self, batch_size, **kwargs):
+        '''
+        方法的作用是初始化 RSSM（Recurrent State-Space Model，递归状态空间模型）的状态。在 DreamerV2 算法中，RSSM 状态包括确定性状态（deterministic state）和随机状态（stochastic state）。初始化这些状态是模型开始运行时的必要步骤
+        对比dreamerv1算法，也是存在类似的初始化，一般来说都是初始化为0
+
+        始化确定性状态 deter_state 为全零张量，形状为 (batch_size, deter_size)。
+        初始化随机状态 stoch_state 为全零张量，形状为 (batch_size, stoch_size)。
+        返回初始化的确定性状态和随机状态
+        这个应该是一个工具类，想要初始化状态时随时返回
+        '''
         if self.rssm_type  == 'discrete':
             return RSSMDiscState(
                 torch.zeros(batch_size, self.stoch_size, **kwargs).to(self.device),
