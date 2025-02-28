@@ -32,8 +32,15 @@ class RSSM(nn.Module, RSSMUtils):
         self.act_fn = act_fn
         self.rnn = nn.GRUCell(self.deter_size, self.deter_size) # 有一个RNN层
         self.fc_embed_state_action = self._build_embed_state_action()
+        # 先验分布预测
         self.fc_prior = self._build_temporal_prior()
+        # 后验分布预测
         self.fc_posterior = self._build_temporal_posterior()
+
+        '''
+        fc_embed_state_action->self.rnn->self.fc_prior
+        fc_embed_state_action->self.rnn->self.fc_posterior
+        '''
     
     def _build_embed_state_action(self):
         """
@@ -89,17 +96,31 @@ class RSSM(nn.Module, RSSMUtils):
         return nn.Sequential(*temporal_posterior)
     
     def rssm_imagine(self, prev_action, prev_rssm_state, nonterms=True):
+        '''
+        模拟t时刻动作,rssm状态，t时刻的非终止状态
+
+        返回根据t时刻的动作和rssm状态，预测的t+1时刻的rssm状态，也就是先验状态
+        '''
+        # 随机状态和动作嵌入结合(stoch_size+action_size)抽取得到随机状态动作嵌入（shape=deter_size）
+        # 如果遇到中止状态那么prev_action就是0，prev_rssm_state.stoch*nonterms就是0
+        # state_action_embed中提取的对应特征也是0
         state_action_embed = self.fc_embed_state_action(torch.cat([prev_rssm_state.stoch*nonterms, prev_action],dim=-1))
+        # 将其提取的动作特征输入到RNN中，得到deter_state确定性状态
         deter_state = self.rnn(state_action_embed, prev_rssm_state.deter*nonterms)
+        # 根据观察时离散还是连续，得到不同的随机状态
         if self.rssm_type == 'discrete':
+            # 如果是离散的随机状态，需要将输出的结果作为 logits，然后得到随机分布状态
             prior_logit = self.fc_prior(deter_state)
             stats = {'logit':prior_logit}
+            # 根据logits得到随机状态
             prior_stoch_state = self.get_stoch_state(stats)
             prior_rssm_state = RSSMDiscState(prior_logit, prior_stoch_state, deter_state)
 
         elif self.rssm_type == 'continuous':
+            # 对于连续的随机状态，需要将输出的结果分成两部分，一部分是均值，一部分是标准差
             prior_mean, prior_std = torch.chunk(self.fc_prior(deter_state), 2, dim=-1)
             stats = {'mean':prior_mean, 'std':prior_std}
+            # 根据logits得到随机状态
             prior_stoch_state, std = self.get_stoch_state(stats)
             prior_rssm_state = RSSMContState(prior_mean, std, prior_stoch_state, deter_state)
         return prior_rssm_state
@@ -127,17 +148,23 @@ class RSSM(nn.Module, RSSMUtils):
         prev_action: t时刻的动作,如果是终止状态则是0
         prev_nonterm: t时刻的非终止状态
         prev_rssm_state: t时刻的RSSM状态
+
+        返回预测得到的先验rssm状态和后验rssm状态
         '''
         prior_rssm_state = self.rssm_imagine(prev_action, prev_rssm_state, prev_nonterm)
         deter_state = prior_rssm_state.deter
+        # 结合确定性状态（动作和RSSM状态）和t+1时刻的观察嵌入特征
+        # 后验状态是结合了实际的观察
         x = torch.cat([deter_state, obs_embed], dim=-1)
         if self.rssm_type == 'discrete':
+            # 得到后验状态的logits
             posterior_logit = self.fc_posterior(x)
             stats = {'logit':posterior_logit}
             posterior_stoch_state = self.get_stoch_state(stats)
             posterior_rssm_state = RSSMDiscState(posterior_logit, posterior_stoch_state, deter_state)
         
         elif self.rssm_type == 'continuous':
+            # 得到后验状态的均值和方差
             posterior_mean, posterior_std = torch.chunk(self.fc_posterior(x), 2, dim=-1)
             stats = {'mean':posterior_mean, 'std':posterior_std}
             posterior_stoch_state, std = self.get_stoch_state(stats)
@@ -145,18 +172,29 @@ class RSSM(nn.Module, RSSMUtils):
         return prior_rssm_state, posterior_rssm_state
 
     def rollout_observation(self, seq_len:int, obs_embed: torch.Tensor, action: torch.Tensor, nonterms: torch.Tensor, prev_rssm_state):
-        priors = []
-        posteriors = []
+        '''
+        seq_len: 序列长度
+        obs_embed: 观察嵌入特征
+        action: 动作
+        nonterms: 非终止状态
+        prev_rssm_state: 前一个RSSM状态,在t=0时刻是初始化的状态,全0
+        '''
+        
+        priors = [] # 存储t时刻的先验状态
+        posteriors = [] # 存储t时刻的后验状态
         # 遍历序列长度
         for t in range(seq_len):
             # t时刻的动作 乘以 t时刻的非终止状态
             # 如果不终止，那么prev_action 就是 t时刻的动作
             # 如果终止，那么prev_action 就是 t时刻的动作乘以0,最终结果也是0
             prev_action = action[t]*nonterms[t]
+            # 根据t+1时刻的观察��入特征，t时刻的动作，t时刻的非终止状态，t1时刻的RSSM状态
+            # 得到t时刻的先验状态和后验状态
             prior_rssm_state, posterior_rssm_state = self.rssm_observe(obs_embed[t], prev_action, nonterms[t], prev_rssm_state)
             priors.append(prior_rssm_state)
             posteriors.append(posterior_rssm_state)
             prev_rssm_state = posterior_rssm_state
+        # 将收集到的1-nt时刻的先验和后验状态��接成一个batch
         prior = self.rssm_stack_states(priors, dim=0)
         post = self.rssm_stack_states(posteriors, dim=0)
         return prior, post

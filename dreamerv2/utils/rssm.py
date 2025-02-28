@@ -4,7 +4,14 @@ import torch
 import torch.nn.functional as F
 from typing import Union
 
+# logit: 根据t-1动作和t-1的离散状态的logits
+# stoch: 根据logit菜样得到的随机状态
+# deter: rnn得到的确定性状态（根据前一时刻的动作和先验的状态）
 RSSMDiscState = namedtuple('RSSMDiscState', ['logit', 'stoch', 'deter'])
+# mean: 根据t-1动作和t-1的连续状态的均值
+# std: 根据t-1动作和t-1的连续状态的标准差
+# stoch: 根据mean和std采样得到的随机状态
+# deter: rnn得到的确定性状态（根据前一时刻的动作和先验的状态）
 RSSMContState = namedtuple('RSSMContState', ['mean', 'std', 'stoch', 'deter'])  
 
 RSSMState = Union[RSSMDiscState, RSSMContState]
@@ -65,19 +72,56 @@ class RSSMUtils(object):
             return td.independent.Independent(td.Normal(rssm_state.mean, rssm_state.std), 1)
 
     def get_stoch_state(self, stats):
+        '''
+        这个函数好像是根据计算得到的概率分布，然后采样得到随机状态
+        '''
         if self.rssm_type == 'discrete':
             logit = stats['logit']
-            shape = logit.shape
+            shape = logit.shape # (batch_size, stoch_size)
+            # 将logit转换为(batch_size, category_size, class_size)，那么category_size*class_size就要stoch_size
+            # todo 结合后续学习class_size和category_size分别代表什么意思？有什么意义
             logit = torch.reshape(logit, shape = (*shape[:-1], self.category_size, self.class_size))
+            # 然后根据OneHotCategorical创建一个概率分布
             dist = torch.distributions.OneHotCategorical(logits=logit)        
+            # stoch shape = (batch_size, category_size, class_size)
             stoch = dist.sample()
+            '''
+            这行代码的目的是通过一种称为 "Straight-Through Estimator" 的技术来实现梯度传播。具体来说，它在离散采样过程中保持梯度信息，以便在反向传播时能够更新模型参数。
+具体解释
+dist.sample()：首先，从 OneHotCategorical 分布中采样得到 stoch，这是一个 one-hot 编码的张量，表示离散的随机变量。
+
+dist.probs：这是 OneHotCategorical 分布的概率，表示每个类别的概率分布。
+
+dist.probs.detach()：使用 detach() 方法从计算图中分离出 dist.probs，使其在反向传播时不会计算梯度。
+
+dist.probs - dist.probs.detach()：这部分计算结果是一个零梯度的张量，因为 dist.probs 和 dist.probs.detach() 的值是相同的，但 dist.probs.detach() 没有梯度。
+
+stoch += dist.probs - dist.probs.detach()：这一步将采样得到的 stoch 加上零梯度的 dist.probs，从而在前向传播时保持 stoch 的值不变，但在反向传播时，梯度将通过 dist.probs 传播。
+
+作用
+这种技术的作用是：
+
+保持离散采样的值：在前向传播时，stoch 保持为离散采样的值。
+实现梯度传播：在反向传播时，梯度通过 dist.probs 传播，从而实现对模型参数的更新。
+这种方法在训练包含离散变量的神经网络时非常有用，因为离散采样本身是不可微的，而这种技术允许我们在不改变采样值的情况下实现梯度传播。
+            '''
             stoch += dist.probs - dist.probs.detach()
+            # 返回的stoch shape = (batch_size, stoch_size)
             return torch.flatten(stoch, start_dim=-2, end_dim=-1)
 
         elif self.rssm_type == 'continuous':
+            # 如果是连续的随机状态，直接返回均值和标准差
             mean = stats['mean']
             std = stats['std']
+            # min_std标准差的最小值，超参数，避免标准差过小，导致数值不稳定
+            # F.softplus(std)函数将标准差 std 转换为正值
+            # 因为过小的标准差可能导致数值不稳定和梯度爆炸。
             std = F.softplus(std) + self.min_std
+            '''
+            torch.randn_like(mean)：生成一个与 mean 张量形状相同的标准正态分布（均值为 0，标准差为 1）的随机张量。
+std * torch.randn_like(mean)：将生成的标准正态分布随机张量乘以标准差 std，得到一个标准差为 std 的正态分布随机张量。
+mean + std * torch.randn_like(mean)：将上述结果加上均值 mean，得到一个均值为 mean，标准差为 std 的正态分布随机张量。
+            '''
             return mean + std*torch.randn_like(mean), std
 
     def rssm_stack_states(self, rssm_states, dim):
@@ -96,6 +140,7 @@ class RSSMUtils(object):
         )
 
     def get_model_state(self, rssm_state):
+        # 结合确定性状态和随机状态得到模型状态
         if self.rssm_type == 'discrete':
             return torch.cat((rssm_state.deter, rssm_state.stoch), dim=-1)
         elif self.rssm_type == 'continuous':

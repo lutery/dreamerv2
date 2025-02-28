@@ -64,11 +64,16 @@ class ObsDecoder(nn.Module):
         activation = info['activation']
         d = info['depth']
         k  = info['kernel']
+        # 计算第一层的卷积输出尺寸，这里应该是计算每一层的反卷积的输出尺寸
+        # 得到最终输入的状态需要是什么尺寸
         conv1_shape = conv_out_shape(output_shape[1:], 0, k, 1)
+        # 计算第二层的卷积输出尺寸
         conv2_shape = conv_out_shape(conv1_shape, 0, k, 1)
+        # 计算第三层的卷积输出尺寸
         conv3_shape = conv_out_shape(conv2_shape, 0, k, 1)
         self.conv_shape = (4*d, *conv3_shape)
         self.output_shape = output_shape
+        # 这层是确保输出的维度是符合np.prod(self.conv_shape)
         if embed_size == np.prod(self.conv_shape).item():
             self.linear = nn.Identity()
         else:
@@ -82,14 +87,20 @@ class ObsDecoder(nn.Module):
         )
 
     def forward(self, x):
-        batch_shape = x.shape[:-1]
-        embed_size = x.shape[-1]
+        batch_shape = x.shape[:-1] # 这里应该是l, n
+        embed_size = x.shape[-1] # 潜入尺寸 todo 实际运行的时这里输入的维度的意义
         squeezed_size = np.prod(batch_shape).item()
         x = x.reshape(squeezed_size, embed_size)
+        # 将维度转变为 (squeezed_size, *self.conv_shape)
         x = self.linear(x)
         x = torch.reshape(x, (squeezed_size, *self.conv_shape))
+        # 反卷积输出模拟的环境观察
         x = self.decoder(x)
+        # 转变回 (l, n, *self.output_shape)也就是 (l, n, c, h, w)
+        # 这里输出的是每个维度的均值
         mean = torch.reshape(x, (*batch_shape, *self.output_shape))
+        # 根据每个维度的均值和方差构建一个正态分布
+        # td.Independent 的主要作用是将多维分布的各个维度视为独立的，从而在计算对数概率时可以将各个维度的对数概率相加。这对于处理高维观测数据非常有用，因为它简化了对数概率的计算
         obs_dist = td.Independent(td.Normal(mean, 1), len(self.output_shape))
         return obs_dist
     

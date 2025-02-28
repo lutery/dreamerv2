@@ -179,13 +179,22 @@ class Trainer(object):
         embed = self.ObsEncoder(obs)                                         #t to t+seq_len   
         # 获取rssm初始化特征，每次训练计算损失时都需要初始化
         prev_rssm_state = self.RSSM._init_rssm_state(self.batch_size)   
+        # 得到先验和后验状态时间序列
         prior, posterior = self.RSSM.rollout_observation(self.seq_len, embed, actions, nonterms, prev_rssm_state)
+        # 根据后验状态的确定性状态和随机状态得到模型状态
+        # todo 后验是有根据实际的状态得到的，所以在实际使用时是如何使用的呢？
         post_modelstate = self.RSSM.get_model_state(posterior)               #t to t+seq_len   
+        # 输出一个观察分布，一个奖励分布，一个折扣因子分布
+        # todo 为什么要输出分布而不是直接输出值
+        # 以下预测输入的是时刻与计算损失的时刻不包含最后一个时刻
         obs_dist = self.ObsDecoder(post_modelstate[:-1])                     #t to t+seq_len-1  
         reward_dist = self.RewardDecoder(post_modelstate[:-1])               #t to t+seq_len-1  
+        # todo 这个不是折扣模型吗？为什么和nonterms计算损失
         pcont_dist = self.DiscountModel(post_modelstate[:-1])                #t to t+seq_len-1   
         
+        # todo 为啥计算观察损失时不包含最后一个时刻，和post_modelstate[:-1对应
         obs_loss = self._obs_loss(obs_dist, obs[:-1])
+        # todo 而计算奖励损失时不包含第一个时刻，上面偏差一个时刻，相当于和预测t+1时刻的奖励计算损失
         reward_loss = self._reward_loss(reward_dist, rewards[1:])
         pcont_loss = self._pcont_loss(pcont_dist, nonterms[1:])
         prior_dist, post_dist, div = self._kl_loss(prior, posterior)
@@ -223,6 +232,10 @@ class Trainer(object):
         return value_loss
             
     def _obs_loss(self, obs_dist, obs):
+        # 利用实际的观察，获取对应的观察分布的概率的log值
+        # 如果想要obs_loss最小，那么obs_dist.log_prob(obs)应该最大
+        # 如果想要obs_dist.log_prob(obs)应该最大，obs_dist在obs处的概率应该最大
+        # 从而达到优化的目的
         obs_loss = -torch.mean(obs_dist.log_prob(obs))
         return obs_loss
     
@@ -247,11 +260,14 @@ class Trainer(object):
         return prior_dist, post_dist, kl_loss
     
     def _reward_loss(self, reward_dist, rewards):
+        # 原理同_obs_loss
         reward_loss = -torch.mean(reward_dist.log_prob(rewards))
         return reward_loss
     
     def _pcont_loss(self, pcont_dist, nonterms):
+        # 将booean转换为float：布尔值可以转换为浮点数。布尔值 True 会被转换为 1.0，而布尔值 False 会被转换为 0.0
         pcont_target = nonterms.float()
+        # 接下来原理同_obs_loss
         pcont_loss = -torch.mean(pcont_dist.log_prob(pcont_target))
         return pcont_loss
 
