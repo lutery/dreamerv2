@@ -64,6 +64,9 @@ class RSSMUtils(object):
             )
         
     def get_dist(self, rssm_state):
+        '''
+        根据传入的RSSM状态，构建返回一个概率分布
+        '''
         if self.rssm_type == 'discrete':
             shape = rssm_state.logit.shape
             logit = torch.reshape(rssm_state.logit, shape = (*shape[:-1], self.category_size, self.class_size))

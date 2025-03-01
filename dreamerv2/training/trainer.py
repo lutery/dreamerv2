@@ -197,6 +197,7 @@ class Trainer(object):
         # todo 而计算奖励损失时不包含第一个时刻，上面偏差一个时刻，相当于和预测t+1时刻的奖励计算损失
         reward_loss = self._reward_loss(reward_dist, rewards[1:])
         pcont_loss = self._pcont_loss(pcont_dist, nonterms[1:])
+        # 是的，在 DreamerV2 算法中，_kl_loss 损失用于衡量先验状态（prior state）和后验状态（posterior state）之间的差异。具体来说，_kl_loss 计算的是先验分布和后验分布之间的 Kullback-Leibler (KL) 散度。通过最小化这个损失，算法可以使先验状态和后验状态尽可能接近
         prior_dist, post_dist, div = self._kl_loss(prior, posterior)
 
         model_loss = self.loss_scale['kl'] * div + reward_loss + obs_loss + self.loss_scale['discount']*pcont_loss
@@ -244,9 +245,13 @@ class Trainer(object):
         post_dist = self.RSSM.get_dist(posterior)
         if self.kl_info['use_kl_balance']:
             alpha = self.kl_info['kl_balance_scale']
+            # 计算两个分布之间的KL散度
+            # 因为要尽可能接近，所以要计算两个分布之间的KL散度两次（颠倒顺序计算一次），通过计算这两个值，可以更全面地衡量先验和后验分布之间的差异
+            # todo 这里使用detach是不是在计算损失时，不能存在两个互相可以计算梯度的张量？从而为了在计算 KL 散度时，防止梯度通过这些分布传播，从而避免影响模型的其他部分
             kl_lhs = torch.mean(torch.distributions.kl.kl_divergence(self.RSSM.get_dist(self.RSSM.rssm_detach(posterior)), prior_dist))
             kl_rhs = torch.mean(torch.distributions.kl.kl_divergence(post_dist, self.RSSM.get_dist(self.RSSM.rssm_detach(prior))))
             if self.kl_info['use_free_nats']:
+                # 是否开启防止kl散度过大的情况
                 free_nats = self.kl_info['free_nats']
                 kl_lhs = torch.max(kl_lhs,kl_lhs.new_full(kl_lhs.size(), free_nats))
                 kl_rhs = torch.max(kl_rhs,kl_rhs.new_full(kl_rhs.size(), free_nats))
