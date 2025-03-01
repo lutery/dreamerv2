@@ -126,19 +126,34 @@ class RSSM(nn.Module, RSSMUtils):
         return prior_rssm_state
 
     def rollout_imagination(self, horizon:int, actor:nn.Module, prev_rssm_state):
+        '''
+        param horizon: int, 要进行 rollout的步数 todo
+        param actor: nn.Module, 用于执行动作的actor模型
+        param prev_rssm_state: RSSMState, 初始的rssm状态,这里传入的后验状态
+
+        return next_rssm_states: RSSMState, 预测得到的先验状态
+        return imag_log_probs: torch.Tensor, 每个horizon步的动作的对数概率
+        return action_entropy: torch.Tensor, 每个horizon步的动作的熵
+        '''
+
         rssm_state = prev_rssm_state
         next_rssm_states = []
-        action_entropy = []
-        imag_log_probs = []
+        action_entropy = [] # 存储动作的熵
+        imag_log_probs = [] # 存储动作的对数概率
         for t in range(horizon):
+            # todo 确定后验状态中的deter和stoch是否存在t时刻偏移
             action, action_dist = actor((self.get_model_state(rssm_state)).detach())
+            # 根据动作和后验状态预测得到的预测先验状态 todo
             rssm_state = self.rssm_imagine(action, rssm_state)
             next_rssm_states.append(rssm_state)
             action_entropy.append(action_dist.entropy())
             imag_log_probs.append(action_dist.log_prob(torch.round(action.detach())))
 
+        # 整合每个horizon步的结果到一个RSSMDiscState中
         next_rssm_states = self.rssm_stack_states(next_rssm_states, dim=0)
+        # 整合每个horizon步的熵
         action_entropy = torch.stack(action_entropy, dim=0)
+        # 整合每个horizon步的对数概率
         imag_log_probs = torch.stack(imag_log_probs, dim=0)
         return next_rssm_states, imag_log_probs, action_entropy
 

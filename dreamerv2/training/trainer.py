@@ -86,6 +86,7 @@ class Trainer(object):
             grad_norm_model = torch.nn.utils.clip_grad_norm_(get_parameters(self.world_list), self.grad_clip_norm)
             self.model_optimizer.step()
 
+            # 根据后验状态计算actor和critic的损失
             actor_loss, value_loss, target_info = self.actorcritc_loss(posterior)
 
             self.actor_optimizer.zero_grad()
@@ -99,6 +100,7 @@ class Trainer(object):
 
             self.actor_optimizer.step()
             self.value_optimizer.step()
+            # 到这里训练结束，后续是记录训练过程中的统计值
 
             with torch.no_grad():
                 prior_ent = torch.mean(prior_dist.entropy())
@@ -135,24 +137,36 @@ class Trainer(object):
         return train_metrics
 
     def actorcritc_loss(self, posterior):
+        '''
+        param posterior: 后验状态
+        '''
         with torch.no_grad():
+            # self.RSSM.rssm_seq_to_batch 将RSSM状态转换为batch形式也就是将l n合并为一个维度
+            # 然后再将后验状态分离出梯度计算
             batched_posterior = self.RSSM.rssm_detach(self.RSSM.rssm_seq_to_batch(posterior, self.batch_size, self.seq_len-1))
         
+        # 冻结非actor和value的参数
         with FreezeParameters(self.world_list):
             imag_rssm_states, imag_log_prob, policy_entropy = self.RSSM.rollout_imagination(self.horizon, self.ActionModel, batched_posterior)
         
+        # 结合预测的想象状态中的确定性状态和随机状态，得到模型状态
         imag_modelstates = self.RSSM.get_model_state(imag_rssm_states)
+        # 冻结除动作模型以外的所有模型
         with FreezeParameters(self.world_list+self.value_list+[self.TargetValueModel]+[self.DiscountModel]):
+            # 根据预测的状态计算奖励分布，有点像dqn的c51
             imag_reward_dist = self.RewardDecoder(imag_modelstates)
             imag_reward = imag_reward_dist.mean
+            # 预测价值分布
             imag_value_dist = self.TargetValueModel(imag_modelstates)
             imag_value = imag_value_dist.mean
+            # 预测终止状态分布
             discount_dist = self.DiscountModel(imag_modelstates)
             discount_arr = self.discount*torch.round(discount_dist.base_dist.probs)              #mean = prob(disc==1)
 
         actor_loss, discount, lambda_returns = self._actor_loss(imag_reward, imag_value, discount_arr, imag_log_prob, policy_entropy)
         value_loss = self._value_loss(imag_modelstates, discount, lambda_returns)     
-
+        
+        # 记录训练过程中的统计值
         mean_target = torch.mean(lambda_returns, dim=1)
         max_targ = torch.max(mean_target).item()
         min_targ = torch.min(mean_target).item() 
@@ -164,7 +178,8 @@ class Trainer(object):
             'std_targ':std_targ,
             'mean_targ':mean_targ,
         }
-
+    
+        # 返回动作损失，价值损失，统计信息
         return actor_loss, value_loss, target_info
 
     def representation_loss(self, obs, actions, rewards, nonterms):
@@ -173,6 +188,8 @@ class Trainer(object):
         param actions: 动作
         param rewards: 奖励
         param nonterms: 非终止状态
+
+        return model_loss, kl_loss, obs_loss, reward_loss, pcont_loss, prior, posterior
         '''
 
         # 得到观察的嵌入特征
@@ -199,26 +216,64 @@ class Trainer(object):
         pcont_loss = self._pcont_loss(pcont_dist, nonterms[1:])
         # 是的，在 DreamerV2 算法中，_kl_loss 损失用于衡量先验状态（prior state）和后验状态（posterior state）之间的差异。具体来说，_kl_loss 计算的是先验分布和后验分布之间的 Kullback-Leibler (KL) 散度。通过最小化这个损失，算法可以使先验状态和后验状态尽可能接近
         prior_dist, post_dist, div = self._kl_loss(prior, posterior)
-
+    
+        # 汇总模型损失
         model_loss = self.loss_scale['kl'] * div + reward_loss + obs_loss + self.loss_scale['discount']*pcont_loss
         return model_loss, div, obs_loss, reward_loss, pcont_loss, prior_dist, post_dist, posterior
 
     def _actor_loss(self, imag_reward, imag_value, discount_arr, imag_log_prob, policy_entropy):
+        '''
+        param imag_reward: dreamerv2预测的奖励
+        param imag_value: dreamerv2预测的价值
+        param discount_arr: discount因子
+        param imag_log_prob: dreamerv2的预测动作的对数概率 ，通过预测一个动作的对数概率，然后通过这个对数概率知道该往哪个方向走
+        param policy_entropy: dreamerv2的预测动作的熵
 
+        return 动作损失，折扣，lambda_returns（ppo的长期回报序列）
+        '''
+
+        # 计算预测的动作回报
         lambda_returns = compute_return(imag_reward[:-1], imag_value[:-1], discount_arr[:-1], bootstrap=imag_value[-1], lambda_=self.lambda_)
         
         if self.config.actor_grad == 'reinforce':
-            advantage = (lambda_returns-imag_value[:-1]).detach()
-            objective = imag_log_prob[1:].unsqueeze(-1) * advantage
+            # 基于策略梯度：传统的REINFORCE算法风格
+            advantage = (lambda_returns-imag_value[:-1]).detach() # 使用优势函数：计算返回值与基线（价值估计）之间的差值作为优势
+            objective = imag_log_prob[1:].unsqueeze(-1) * advantage # 通过动作的对数概率乘以优势函数来更新策略
+            '''
+            更高的方差
+            更慢的收敛
+            但在某些情况下可能探索性更好
+            '''
 
         elif self.config.actor_grad == 'dynamics':
+            '''
+            基于路径导数：直接通过世界模型的动态梯度进行反向传播
+            使用返回值：直接最大化预期返回值
+            梯度更新方式：梯度通过想象的状态-动作轨迹直接反向传播
+            '''
             objective = lambda_returns
+
+            '''
+            在实践中，dynamics 策略是 DreamerV2 的默认选择，因为它通常提供更好的性能和更快的收敛。然而，提供 reinforce 选项可能是为了在特定环境或情况下提供替代方案。
+            '''
         else:
             raise NotImplementedError
 
-        discount_arr = torch.cat([torch.ones_like(discount_arr[:1]), discount_arr[1:]])
-        discount = torch.cumprod(discount_arr[:-1], 0)
-        policy_entropy = policy_entropy[1:].unsqueeze(-1)
+        discount_arr = torch.cat([torch.ones_like(discount_arr[:1]), discount_arr[1:]]) # 首先，将第一个折扣因子强制设为 1.0，确保从当前时间步开始的奖励权重是 100%
+        discount = torch.cumprod(discount_arr[:-1], 0) # 然后，计算累积折扣乘积，表示未来奖励在当前决策中的重要性逐渐降低
+        policy_entropy = policy_entropy[1:].unsqueeze(-1) # 选取策略熵（不包括第一个时间步
+        '''
+        策略熵是衡量行动"随机性"的指标。想象一个掷骰子的游戏：
+
+        低熵：总是倾向于选择某个数字
+        高熵：完全随机地选择任何数字
+        '''
+
+        # objective:主要目标（返回值或优势函数）
+        # self.actor_entropy_scale * policy_entropy 加上策略熵（乘以一个系数来调整探索程度）
+        # discount 加权平均,用折扣因子对每个时间步的目标进行加权,近期回报权重高，远期回报权重低
+        # torch.mean 先对批次维度求均值 l n中的n
+        # torch.sum 再对时间维度求和l n中的l
         actor_loss = -torch.sum(torch.mean(discount * (objective + self.actor_entropy_scale * policy_entropy), dim=1)) 
         return actor_loss, discount, lambda_returns
 
@@ -228,7 +283,44 @@ class Trainer(object):
             value_discount = discount.detach()
             value_target = lambda_returns.detach()
 
+        # 用动作模型预测的模型状态（后验的随机状态和确定状态）预测价值分布
         value_dist = self.ValueModel(value_modelstates) 
+        # 为什么要乘以：value_discount
+        '''
+        为什么在 _value_loss 中要乘以 value_discount
+        在 DreamerV2 的 _value_loss 方法中，乘以 value_discount 是一个重要的设计，其目的是按时间步长的重要性对值函数的损失进行加权。让我们详细解释原因：
+
+        价值损失函数的计算
+        为什么要乘以 value_discount
+        时间步长加权：
+
+        value_discount 是累积折扣因子，表示每个时间步长的相对重要性
+        较近的未来时间步长有更高的折扣值（接近1），较远的未来时间步长有较低的折扣值
+        通过乘以这个折扣，算法对近期预测的准确性给予更高的权重
+        一致性与策略损失：
+
+        在 _actor_loss 中，也使用了相同的折扣因子来加权目标
+        这种一致性确保策略和值函数的训练是协调的，都更关注近期回报
+        不确定性处理：
+
+        预测越远的未来，不确定性就越大
+        通过折扣，算法减少了对高不确定性远期预测的依赖
+        终止状态的考虑：
+
+        折扣因子考虑了可能的终止状态
+        如果某条路径可能很快终止，那么其后续步骤的权重会相应降低
+        实际效果
+        这种设计的实际效果是：
+
+        稳定训练：减少远期预测误差对训练的影响
+        更好的近期预测：值函数更准确地预测近期回报
+        更高效的学习：资源集中在更重要和更确定的预测上
+        这种按折扣加权的值函数损失是 DreamerV2 能有效学习长期预测同时保持稳定性的关键技术之一。
+
+        也就是说越远的价值预测越不准确，方差越高，所以要降低权重，越近的价值预测，方差越低，所以权重越高
+        所以这里的价值预测关键优化点就在alue_dist.log_prob(value_target)，如果与value_target相差大，那么就会将对应的价值概率降低，如果与value_target相差小，那么就会将对应的价值概率提高
+        因为这里预测的是价值分布，所以要通过价值分布的对数概率来计算价值损失
+        '''
         value_loss = -torch.mean(value_discount*value_dist.log_prob(value_target).unsqueeze(-1))
         return value_loss
             
@@ -241,9 +333,30 @@ class Trainer(object):
         return obs_loss
     
     def _kl_loss(self, prior, posterior):
+        '''
+        返回先验分布，后验分布，KL散度损失
+        '''
+
         prior_dist = self.RSSM.get_dist(prior)
         post_dist = self.RSSM.get_dist(posterior)
         if self.kl_info['use_kl_balance']:
+            '''
+            它控制是否使用 KL 平衡技术来计算 KL 损失
+            当 use_kl_balance 设置为 True 时，算法会采用 KL 平衡技术，即计算两个方向的 KL 散度并加权平均：
+
+kl_lhs：计算后验分布到先验分布的 KL 散度
+kl_rhs：计算先验分布到后验分布的 KL 散度
+然后通过以下公式计算平衡的 KL 损失：
+
+其中 alpha 是平衡系数（kl_balance_scale），控制两个方向 KL 散度的权重。
+
+为什么需要 KL 平衡？
+KL 散度是非对称的，即 KL(P||Q) 不等于 KL(Q||P)。这两个方向的散度有不同的优化特性：
+
+KL(posterior||prior)：倾向于使后验分布更加"模式覆盖"（mode-covering）
+KL(prior||posterior)：倾向于使后验分布更加"模式寻找"（mode-seeking）
+通过平衡两个方向的 KL 散度，可以综合两者的优点，使模型既能覆盖多种可能的模式，又能准确地定位特定模式。
+            '''
             alpha = self.kl_info['kl_balance_scale']
             # 计算两个分布之间的KL散度
             # 因为要尽可能接近，所以要计算两个分布之间的KL散度两次（颠倒顺序计算一次），通过计算这两个值，可以更全面地衡量先验和后验分布之间的差异
@@ -251,13 +364,21 @@ class Trainer(object):
             kl_lhs = torch.mean(torch.distributions.kl.kl_divergence(self.RSSM.get_dist(self.RSSM.rssm_detach(posterior)), prior_dist))
             kl_rhs = torch.mean(torch.distributions.kl.kl_divergence(post_dist, self.RSSM.get_dist(self.RSSM.rssm_detach(prior))))
             if self.kl_info['use_free_nats']:
-                # 是否开启防止kl散度过大的情况
+                '''
+                在 free nats 技术中，其目的并不是限制 KL 损失的上限，而是设置一个下界，防止 KL 损失变得太小，从而使得模型忽略一定程度的正则化。也就是说，使用 torch.max 的目的是：
+
+如果计算得到的 KL 值低于 free nats 阈值，则用 free nats 替换（即不允许 KL 损失低于这个值），从而保证有一定的 KL 惩罚存在；
+如果默认 free_nats 为 0，则 torch.max(kl, 0) 没有实际影响，相当于没有启用该功能。
+因此，如果目标是防止 KL 损失过低（而不是过高），那么使用 torch.max 是正确的做法。使用 torch.min 则会限制 KL 的上限，这并不是 free nats 的目的。
+                '''
                 free_nats = self.kl_info['free_nats']
                 kl_lhs = torch.max(kl_lhs,kl_lhs.new_full(kl_lhs.size(), free_nats))
                 kl_rhs = torch.max(kl_rhs,kl_rhs.new_full(kl_rhs.size(), free_nats))
+            # 通过 alpha 权重平衡两个 KL 散度的值，从而得到最终的 KL 损失
             kl_loss = alpha*kl_lhs + (1-alpha)*kl_rhs
 
         else: 
+            # 这边仅计算一个KL散度损失
             kl_loss = torch.mean(torch.distributions.kl.kl_divergence(post_dist, prior_dist))
             if self.kl_info['use_free_nats']:
                 free_nats = self.kl_info['free_nats']
@@ -344,6 +465,9 @@ class Trainer(object):
         
         # 判断是否加入折扣因子模型，用于预测长期的回报
         if config.discount['use']:
+            '''
+            在 DreamerV2 中的作用是预测环境中的折扣因子（discount factor）或者说是终止概率。它实际上是一个终止预测器（termination predictor），用于学习预测某个状态是否为终止状态或者离终止状态有多远。
+            '''
             self.DiscountModel = DenseModel((1,), modelstate_size, config.discount).to(self.device)
         
         # 构建环境观察编码器和解码器（分像素空间和线性空间）
@@ -358,9 +482,11 @@ class Trainer(object):
         model_lr = config.lr['model']
         actor_lr = config.lr['actor']
         value_lr = config.lr['critic']
+        # 包含环境编码器、RSSM、奖励解码器、观察解码器和折扣模型
         self.world_list = [self.ObsEncoder, self.RSSM, self.RewardDecoder, self.ObsDecoder, self.DiscountModel]
         self.actor_list = [self.ActionModel]
         self.value_list = [self.ValueModel]
+        # 包含策略和价值网络
         self.actorcritic_list = [self.ActionModel, self.ValueModel]
         self.model_optimizer = optim.Adam(get_parameters(self.world_list), model_lr)
         self.actor_optimizer = optim.Adam(get_parameters(self.actor_list), actor_lr)

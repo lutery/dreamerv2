@@ -11,6 +11,8 @@ def compute_return(
     Compute the discounted reward for a batch of data.
     reward, value, and discount are all shape [horizon - 1, batch, 1] (last element is cut off)
     Bootstrap is [batch, 1]
+
+    todo 这个函数有点像ppo算法中，直接计算优势函数的函数，但是这里是计算回报函数
     """
     next_values = torch.cat([value[1:], bootstrap[None]], 0)
     target = reward + discount * next_values * (1 - lambda_)

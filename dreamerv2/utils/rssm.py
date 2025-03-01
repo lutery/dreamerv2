@@ -34,6 +34,9 @@ class RSSMUtils(object):
             raise NotImplementedError
 
     def rssm_seq_to_batch(self, rssm_state, batch_size, seq_len):
+        '''
+        为了更好的训练，这里将rssm state转化为batch形式，也就是将前两维度seq_len, batch(l, n)合并为一个维度
+        '''
         if self.rssm_type == 'discrete':
             return RSSMDiscState(
                 seq_to_batch(rssm_state.logit[:seq_len], batch_size, seq_len),
