@@ -154,3 +154,65 @@ Similar code found with 1 license type
 一个好的实践是，对于复杂的强化学习任务，尤其是具有高维状态空间和多种可能策略的任务，首先尝试使用 use_kl_balance 并设置适当的 kl_balance_scale。如果模型表现良好，可以继续使用；如果资源受限或需要简化，可以尝试不使用平衡并观察性能变化。
 
 对于 DreamerV2 这样的高级模型，作者通常建议在复杂任务中使用 KL 平衡，因为它能够带来更稳定和更全面的学习效果。
+
+
+
+在 DreamerV2 算法中，当 `rssm_type` 为 `discrete` 时，使用 `category_size` 和 `class_size` 来表示离散状态空间。这种表示方法有助于捕捉复杂的离散状态特征，并提高模型的表达能力。
+
+## 具体解释
+
+### `category_size` 和 `class_size`
+
+- **`category_size`**：表示离散状态的类别数量。
+- **`class_size`**：表示每个类别中的类的数量。
+
+通过组合 `category_size` 和 `class_size`，可以构建一个更丰富的离散状态空间。例如，如果 `category_size` 为 5，`class_size` 为 10，则整个状态空间的大小为 5 * 10 = 50。
+
+### 为什么要分 `category_size` 和 `class_size`
+
+1. **捕捉复杂特征**：
+   - 通过将状态空间分为多个类别和每个类别中的类，可以更好地捕捉复杂的离散特征。
+   - 这种表示方法允许模型在每个类别中选择一个类，从而形成一个更丰富的状态表示。
+
+2. **提高表达能力**：
+   - 这种分层表示方法提高了模型的表达能力，使其能够更好地捕捉环境中的复杂模式。
+   - 通过组合多个类别和类，模型可以表示更多的状态，从而提高预测和决策的准确性。
+
+### 举例说明
+
+假设我们在一个简单的游戏环境中使用 DreamerV2 算法，例如经典的 Atari 游戏 `Breakout`。
+
+#### `Breakout` 游戏示例
+
+- **`category_size`**：5（表示不同的状态类别，例如球的位置、球拍的位置、砖块的状态等）
+- **`class_size`**：10（表示每个类别中的具体状态，例如球的位置可以分为 10 个不同的区域）
+
+通过这种表示方法，模型可以在每个类别中选择一个类，从而形成一个更丰富的状态表示。例如：
+
+- 类别 1（球的位置）：类 3（表示球在第 3 个区域）
+- 类别 2（球拍的位置）：类 7（表示球拍在第 7 个位置）
+- 类别 3（砖块的状态）：类 1（表示砖块的状态为第 1 种）
+
+这种组合表示方法使模型能够更好地捕捉游戏中的复杂状态，从而提高预测和决策的准确性。
+
+### 代码示例
+
+在代码中，我们可以看到 `category_size` 和 `class_size` 的定义和使用：
+
+```python
+def _model_initialize(self, config):
+    ...
+    if config.rssm_type == 'continuous':
+        stoch_size = config.rssm_info['stoch_size']
+    elif config.rssm_type == 'discrete':
+        category_size = config.rssm_info['category_size']
+        class_size = config.rssm_info['class_size']
+        stoch_size = category_size * class_size
+    ...
+```
+
+通过这种方式，模型可以根据 `category_size` 和 `class_size` 来配置离散类型的 RSSM，从而提高模型的表达能力和预测准确性。
+
+## 总结
+
+在 DreamerV2 算法中，当 `rssm_type` 为 `discrete` 时，使用 `category_size` 和 `class_size` 来表示离散状态空间。这种表示方法有助于捕捉复杂的离散特征，并提高模型的表达能力。通过组合多个类别和类，模型可以表示更多的状态，从而提高预测和决策的准确性。
